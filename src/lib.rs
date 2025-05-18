@@ -115,16 +115,7 @@ extern "C" fn trace_callback(
     if what != ffi::PyTrace_LINE {
         return 0;
     }
-    let code = {
-        #[cfg(Py_3_8)]
-        {
-            unsafe { (*frame).f_code }
-        }
-        #[cfg(Py_3_9)]
-        unsafe {
-            ffi::PyFrame_GetCode(frame)
-        }
-    };
+    let code = { unsafe { ffi::PyFrame_GetCode(frame) } };
     let filename_ptr = unsafe { (*code).co_filename };
     if filename_ptr.is_null() {
         return 0;
