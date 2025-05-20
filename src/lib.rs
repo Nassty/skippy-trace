@@ -116,7 +116,7 @@ extern "C" fn trace_callback(
         return 0;
     }
     let code = {
-        #[cfg(Py_3_8)]
+        #[cfg(not(Py_3_9))]
         {
             unsafe { (*frame).f_code }
         }
