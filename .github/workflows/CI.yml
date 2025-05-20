@@ -66,7 +66,7 @@ jobs:
 
       # 7. Upload the built wheels for inspection or later publishing
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.os }}-py${{ matrix.python-version }}
           path: target/wheels/*.whl
