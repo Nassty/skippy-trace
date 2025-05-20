@@ -57,12 +57,7 @@ jobs:
         env:
           PYVER: ${{ matrix.python-version }}
         run: |
-          # On Linux, build a manylinux2014 wheel via Docker
-          if [ "$(uname)" = "Linux" ]; then
-            maturin build --release --strip --manylinux 2014 -i python$PYVER
-          else
-            maturin build --release --strip -i python$PYVER
-          fi
+          maturin build --release --strip -i python$PYVER
 
       # 7. Upload the built wheels for inspection or later publishing
       - name: Upload wheel artifact
