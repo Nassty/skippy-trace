@@ -37,10 +37,7 @@ jobs:
 
       # 3. Install Rust (stable) via actions-rs
       - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
       # 4. Install the matching Python
       - name: Set up Python ${{ matrix.python-version }}
