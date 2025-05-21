@@ -35,31 +35,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # 3. Install Rust (stable) via actions-rs
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # 4. Install the matching Python
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      # 5. Install maturin (and wheel tooling)
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
       - name: Install maturin
-        run: pip install maturin setuptools wheel
+        run: uv tool install maturin
 
       # 6. Build a wheel
       - name: Build wheel
         env:
-          PYVER: ${{ matrix.python-version }}
+          UV_PYTHON: ${{ matrix.python-version }}
         run: |
-          maturin build --release --strip -i python$PYVER
+          uv run maturin build --release --strip -i python$UV_PYTHON
 
       # 7. Upload the built wheels for inspection or later publishing
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: skippy-tracer-wheel-${{ matrix.os }}-py${{ matrix.python-version }}
           path: target/wheels/*.whl
-
