@@ -1,16 +1,14 @@
+#![warn(clippy::all, clippy::pedantic)]
 use once_cell::sync::OnceCell;
-use pyo3::ffi;
-use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::{
+    ffi,
+    prelude::*,
+    types::{PyAny, PyDict},
+};
 use rusqlite::{params, Connection, OpenFlags};
-use std::cell::RefCell;
-use std::ffi::CStr;
-use std::os::raw::c_int;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
-use std::ptr;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::{
+    cell::RefCell, ffi::CStr, os::raw::c_int, path::PathBuf, ptr, sync::Mutex, time::Duration,
+};
 
 static DB_CONN: OnceCell<Mutex<Connection>> = OnceCell::new();
 
@@ -20,10 +18,35 @@ static VENV_PREFIX: OnceCell<String> = OnceCell::new();
 thread_local! {
     static TEST_NODEID: RefCell<Option<String>> = const { RefCell::new(None) };
     static TRACE_EVENTS: RefCell<Vec<(String, usize)>> = const { RefCell::new(Vec::new()) };
+    static ENABLED: RefCell<bool> = const { RefCell::new(false) };
 }
 
 #[pyfunction]
-fn pytest_configure(_py: Python, config: &Bound<'_, PyAny>) -> PyResult<()> {
+fn pytest_addoption(py: Python, parser: &Bound<'_, PyAny>) -> PyResult<()> {
+    let group = parser.call_method1("getgroup", ("skippy-tracer", "Options for skippy-tracer"))?;
+    let builtins = py.import("builtins")?;
+    let str_type = builtins.getattr("str")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("required", false)?;
+    kwargs.set_item("type", str_type)?;
+    kwargs.set_item("default", py.None())?;
+    group.call_method("addoption", ("--cov-db",), Some(&kwargs))?;
+    Ok(())
+}
+
+#[pyfunction]
+fn pytest_configure(py: Python, config: &Bound<'_, PyAny>) -> PyResult<()> {
+    let db_path: Option<String> = config
+        .call_method1("getoption", ("--cov-db", py.None()))?
+        .extract()?;
+
+    let db_path = if let Some(db_path) = db_path {
+        ENABLED.with(|t| *t.borrow_mut() = true);
+        db_path
+    } else {
+        return Ok(());
+    };
+
     let root = config
         .getattr("rootpath")?
         .extract::<PathBuf>()?
@@ -41,7 +64,7 @@ fn pytest_configure(_py: Python, config: &Bound<'_, PyAny>) -> PyResult<()> {
         .into_owned();
 
     let conn = Connection::open_with_flags(
-        "skippy_trace.db",
+        db_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
@@ -56,25 +79,42 @@ fn pytest_configure(_py: Python, config: &Bound<'_, PyAny>) -> PyResult<()> {
              nodeid  TEXT NOT NULL,
              file    TEXT NOT NULL,
              line    INTEGER NOT NULL
-         );",
+         );
+
+         CREATE UNIQUE INDEX IF NOT EXISTS unique_line ON trace (nodeid, file, line);
+",
     )
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
     DB_CONN.set(Mutex::new(conn)).ok();
-    ROOT_PREFIX.set(root).ok();
-    VENV_PREFIX.set(venv).ok();
+    ROOT_PREFIX
+        .set(root)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    VENV_PREFIX
+        .set(venv)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     Ok(())
 }
 
 #[pyfunction]
-fn pytest_runtest_call(_py: Python, item: &Bound<'_, PyAny>) -> PyResult<()> {
-    let nodeid = item.getattr("nodeid")?.extract::<String>()?;
-    TEST_NODEID.with(|t| *t.borrow_mut() = Some(nodeid.clone()));
+#[allow(unused_variables)]
+fn pytest_runtest_logstart(_py: Python, nodeid: &str, location: &Bound<'_, PyAny>) {
+    if !ENABLED.with(|t| *t.borrow()) {
+        return;
+    }
+    TEST_NODEID.with(|t| *t.borrow_mut() = Some(nodeid.to_string()));
     TRACE_EVENTS.with(|b| b.borrow_mut().clear());
     unsafe {
         ffi::PyEval_SetTrace(Some(trace_callback), ptr::null_mut());
     }
-    let result = catch_unwind(AssertUnwindSafe(|| item.call_method0("runtest")));
+}
+
+#[pyfunction]
+#[allow(unused_variables)]
+fn pytest_runtest_logfinish(_py: Python, nodeid: &str, location: &Bound<'_, PyAny>) {
+    if !ENABLED.with(|t| *t.borrow()) {
+        return;
+    }
     unsafe {
         ffi::PyEval_SetTrace(None, ptr::null_mut());
     }
@@ -92,17 +132,14 @@ fn pytest_runtest_call(_py: Python, item: &Bound<'_, PyAny>) -> PyResult<()> {
         }
     });
     TEST_NODEID.with(|t| *t.borrow_mut() = None);
-    match result {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(_) => panic!("test panicked"),
-    }
 }
 
 #[pymodule]
 fn skippy_tracer(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pytest_configure, m)?)?;
-    m.add_function(wrap_pyfunction!(pytest_runtest_call, m)?)?;
+    m.add_function(wrap_pyfunction!(pytest_runtest_logstart, m)?)?;
+    m.add_function(wrap_pyfunction!(pytest_runtest_logfinish, m)?)?;
+    m.add_function(wrap_pyfunction!(pytest_addoption, m)?)?;
     Ok(())
 }
 
@@ -117,8 +154,8 @@ extern "C" fn trace_callback(
     }
     let code = {
         #[cfg(not(Py_3_9))]
-        {
-            unsafe { (*frame).f_code }
+        unsafe {
+            (*frame).f_code
         }
         #[cfg(Py_3_9)]
         unsafe {
@@ -137,6 +174,7 @@ extern "C" fn trace_callback(
     let root = ROOT_PREFIX.get().expect("root not set");
     let venv = VENV_PREFIX.get().expect("venv not set");
     if bytes.starts_with(root.as_bytes()) && !bytes.starts_with(venv.as_bytes()) {
+        #[allow(clippy::cast_sign_loss)] // line numbers are allways positive
         let lineno = unsafe { ffi::PyFrame_GetLineNumber(frame) as usize };
         let file = String::from_utf8_lossy(bytes).into_owned();
         TRACE_EVENTS.with(|b| b.borrow_mut().push((file, lineno)));
